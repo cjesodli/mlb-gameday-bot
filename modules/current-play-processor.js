@@ -1,9 +1,8 @@
 const globalCache = require('./global-cache');
 const globals = require('../config/globals');
-const liveFeed = require('./livefeed');
 
 module.exports = {
-    process: (currentPlayJSON) => {
+    process: (currentPlayJSON, feed, homeTeamEmoji, awayTeamEmoji) => {
         let reply = '';
         if (!globalCache.values.game.startReported
             && currentPlayJSON.playEvents?.find(event => event?.details?.description === 'Status Change - In Progress')) {
@@ -13,13 +12,13 @@ module.exports = {
         let lastEvent;
         if (currentPlayJSON.about?.isComplete
             || globals.EVENT_WHITELIST.includes((currentPlayJSON.result?.eventType || currentPlayJSON.details?.eventType))) {
-            reply += getDescription(currentPlayJSON);
+            reply += getDescription(currentPlayJSON, feed);
             if (currentPlayJSON.result?.isOut || currentPlayJSON.details?.isOut) {
                 reply += ' **' + currentPlayJSON.count.outs + (currentPlayJSON.count.outs > 1 ? ' outs. **' : ' out. **');
             }
             if (!currentPlayJSON.reviewDetails?.inProgress
                 && (currentPlayJSON.about?.isScoringPlay || currentPlayJSON.details?.isScoringPlay)) {
-                reply = addScore(reply, currentPlayJSON);
+                reply = addScore(reply, currentPlayJSON, feed, homeTeamEmoji, awayTeamEmoji);
             }
             if (!currentPlayJSON.about?.hasReview) {
                 if (currentPlayJSON.playEvents) {
@@ -55,9 +54,8 @@ module.exports = {
     }
 };
 
-function addScore (reply, currentPlayJSON) {
+function addScore (reply, currentPlayJSON, feed, homeTeamEmoji, awayTeamEmoji) {
     reply += '\n';
-    const feed = liveFeed.init(globalCache.values.game.currentLiveFeed);
     let homeScore, awayScore;
     if (currentPlayJSON.result) {
         homeScore = currentPlayJSON.result.homeScore;
@@ -67,23 +65,24 @@ function addScore (reply, currentPlayJSON) {
         awayScore = currentPlayJSON.details.awayScore;
     }
     reply += (feed.halfInning() === 'top'
-        ? '# _' + feed.awayAbbreviation() + ' ' + awayScore + '_, ' +
-        feed.homeAbbreviation() + ' ' + homeScore
-        : '# ' + feed.awayAbbreviation() + ' ' + awayScore + ', _' +
-        feed.homeAbbreviation() + ' ' + homeScore + '_');
+        ? '# ' + insertEmojiIfPresent(awayTeamEmoji) + ' _' + feed.awayAbbreviation() + ' ' + awayScore + '_, ' +
+        feed.homeAbbreviation() + ' ' + homeScore + ` ${insertEmojiIfPresent(homeTeamEmoji)}`
+        : '# ' + `${insertEmojiIfPresent(awayTeamEmoji)} ` + feed.awayAbbreviation() + ' ' + awayScore + ', _' +
+        feed.homeAbbreviation() + ' ' + homeScore + '_' + ` ${insertEmojiIfPresent(homeTeamEmoji)}`);
 
     return reply;
 }
 
 function addMetrics (lastEvent, reply) {
     if (lastEvent.hitData.launchSpeed) { // this data can be randomly unavailable
-        reply += '\n\n**Statcast Metrics:**\n';
+        reply += '\n\n';
         reply += 'Exit Velo: ' + lastEvent.hitData.launchSpeed + ' mph' +
             getFireEmojis(lastEvent.hitData.launchSpeed) + '\n';
         reply += 'Launch Angle: ' + lastEvent.hitData.launchAngle + '° \n';
         reply += 'Distance: ' + lastEvent.hitData.totalDistance + ' ft.\n';
-        reply += 'xBA: Pending...';
-        reply += lastEvent.hitData.totalDistance && lastEvent.hitData.totalDistance >= 300 ? '\nHR/Park: Pending...' : '';
+        reply += 'xBA: Pending...\n';
+        reply += 'Bat Speed: Pending...';
+        reply += lastEvent.hitData.totalDistance && lastEvent.hitData.totalDistance >= globals.HOME_RUN_BALLPARKS_MIN_DISTANCE ? '\nHR/Park: Pending...' : '';
     } else {
         reply += '\n\n**Statcast Metrics:**\n';
         reply += 'Data was not available.';
@@ -104,6 +103,10 @@ function getFireEmojis (launchSpeed) {
     }
 }
 
-function getDescription (currentPlayJSON) {
+function getDescription (currentPlayJSON, feed) {
     return (currentPlayJSON.result?.description || currentPlayJSON.details.description || '');
+}
+
+function insertEmojiIfPresent (emoji) {
+    return (emoji ? `<:${emoji.name}:${emoji.id}>` : '');
 }

@@ -1,10 +1,14 @@
-const { AttachmentBuilder, EmbedBuilder } = require('discord.js');
+const { AttachmentBuilder, EmbedBuilder, PermissionsBitField } = require('discord.js');
 const globalCache = require('./global-cache');
 const mlbAPIUtil = require('./MLB-API-util');
-const { joinImages } = require('join-images');
 const globals = require('../config/globals');
 const commandUtil = require('./command-util');
 const queries = require('../database/queries.js');
+const { constructPlayEmbed } = require('./gameday');
+const examplePlays = require('../spec/data/example-plays');
+const exampleLiveFeed = require('../spec/data/example-live-feed');
+const liveFeed = require('./livefeed');
+const currentPlayProcessor = require('./current-play-processor');
 
 module.exports = {
 
@@ -27,9 +31,9 @@ module.exports = {
         }
         const matchup = await mlbAPIUtil.matchup(game.gamePk);
         const probables = matchup.probables;
-        const hydratedHomeProbable = await commandUtil.hydrateProbable(probables.homeProbable);
-        const hydratedAwayProbable = await commandUtil.hydrateProbable(probables.awayProbable);
-        joinImages([hydratedHomeProbable.spot, hydratedAwayProbable.spot],
+        const hydratedHomeProbable = await commandUtil.hydrateProbable(probables.homeProbable, matchup.probables.gameType);
+        const hydratedAwayProbable = await commandUtil.hydrateProbable(probables.awayProbable, matchup.probables.gameType);
+        commandUtil.joinPlayerSpots([hydratedHomeProbable.spot, hydratedAwayProbable.spot],
             { direction: 'horizontal', offset: 10, margin: 0, color: 'transparent' })
             .then(async (img) => {
                 const attachment = new AttachmentBuilder((await img.png().toBuffer()), { name: 'matchupSpots.png' });
@@ -45,7 +49,8 @@ module.exports = {
                             hydratedHomeProbable.pitchMix,
                             hydratedHomeProbable.pitchingStats.lastXGames,
                             hydratedHomeProbable.pitchingStats.seasonAdvanced,
-                            hydratedHomeProbable.pitchingStats.sabermetrics
+                            hydratedHomeProbable.pitchingStats.sabermetrics,
+                            matchup.probables.gameType
                         ),
                         inline: true
                     })
@@ -58,7 +63,8 @@ module.exports = {
                             hydratedAwayProbable.pitchMix,
                             hydratedAwayProbable.pitchingStats.lastXGames,
                             hydratedAwayProbable.pitchingStats.seasonAdvanced,
-                            hydratedAwayProbable.pitchingStats.sabermetrics
+                            hydratedAwayProbable.pitchingStats.sabermetrics,
+                            matchup.probables.gameType
                         ),
                         inline: true
                     });
@@ -86,20 +92,36 @@ module.exports = {
             const gameDate = new Date(game.gameDate);
             const teams = game.teams;
             const home = teams.home.team.id === parseInt(process.env.TEAM_ID);
-            reply += date.date.substr(6) +
-                (home ? ' vs. ' : ' @ ') + (home ? teams.away.team.name : teams.home.team.name) + ' ' +
+            const emoji = globalCache.values.emojis
+                .find(v => v.name.includes(
+                    (home ? teams.away.team.id : teams.home.team.id)
+                ));
+            reply += `${gameDate.toLocaleString('en-US', {
+                timeZone: (process.env.TIME_ZONE?.trim() || 'America/New_York'),
+                weekday: 'short' 
+            })} ${date.date.substr(6)}` +
+                (home ? ' vs. ' : ' @ ') + (home ? teams.away.team.abbreviation : teams.home.team.abbreviation) +
+                `${emoji ? ` <:${emoji.name}:${emoji.id}>` : ''}` +
+                ' ' +
                 gameDate.toLocaleString('en-US', {
-                    timeZone: 'America/New_York',
+                    timeZone: (process.env.TIME_ZONE?.trim() || 'America/New_York'),
                     hour: 'numeric',
                     minute: '2-digit',
                     timeZoneName: 'short'
-                }) +
+                }) + (game.gameType === 'S' ? ' (Spring Training)' : '') +
                 '\n';
         });
-        await interaction.reply({
-            ephemeral: false,
-            content: reply
-        });
+        if (reply.length === 0) {
+            await interaction.reply({
+                ephemeral: false,
+                content: 'There are no games in the next week.'
+            });
+        } else {
+            await interaction.reply({
+                ephemeral: false,
+                content: reply
+            });
+        }
     },
 
     standingsHandler: async (interaction) => {
@@ -112,7 +134,7 @@ module.exports = {
             .records.find((record) => record.division.id === divisionId);
         await interaction.followUp({
             ephemeral: false,
-            files: [new AttachmentBuilder((await commandUtil.buildStandingsTable(divisionStandings, team.teams[0].division.name)), { name: 'standings.png' })]
+            files: [new AttachmentBuilder(commandUtil.buildStandingsTable(divisionStandings, team.teams[0].division.name), { name: 'standings.png' })]
         });
     },
 
@@ -122,19 +144,27 @@ module.exports = {
         const team = await mlbAPIUtil.team(process.env.TEAM_ID);
         const leagueId = team.teams[0].league.id;
         const leagueName = team.teams[0].league.name;
-        const wildcard = (await mlbAPIUtil.wildcard()).records
+        const leagueStandings = await mlbAPIUtil.wildcard();
+        const wildcard = leagueStandings.records
             .find(record => record.standingsType === 'wildCard' && record.league === leagueId);
-        const divisionLeaders = (await mlbAPIUtil.wildcard()).records
+        const divisionLeaders = leagueStandings.records
             .find(record => record.standingsType === 'divisionLeaders' && record.league === leagueId);
-        await interaction.followUp({
-            ephemeral: false,
-            files: [new AttachmentBuilder((await commandUtil.buildWildcardTable(divisionLeaders, wildcard, leagueName)), { name: 'wildcard.png' })]
-        });
+        if (!divisionLeaders || !wildcard) {
+            await interaction.followUp({
+                ephemeral: false,
+                content: 'Wildcard standings are not available yet for this season.'
+            });
+        } else {
+            await interaction.followUp({
+                ephemeral: false,
+                files: [new AttachmentBuilder(commandUtil.buildWildcardTable(divisionLeaders, wildcard, leagueName), { name: 'wildcard.png' })]
+            });
+        }
     },
 
     subscribeGamedayHandler: async (interaction) => {
         console.info(`SUBSCRIBE GAMEDAY command invoked by guild: ${interaction.guildId}`);
-        if (!interaction.member.roles.cache.some(role => globals.ADMIN_ROLES.includes(role.name))) {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
             await interaction.reply({
                 ephemeral: true,
                 content: 'You do not have permission to subscribe channels to the Gameday feed.'
@@ -177,9 +207,58 @@ module.exports = {
         }
     },
 
+    testGamedayReportingHandler: async (interaction) => {
+        console.info(`TEST GAMEDAY REPORTING command invoked by guild: ${interaction.guildId}`);
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
+            await interaction.reply({
+                ephemeral: true,
+                content: 'You do not have permission to use this command.'
+            });
+            return;
+        }
+        const play = interaction.options.getString('play');
+        const feed = liveFeed.init(exampleLiveFeed);
+        if (!interaction.replied) {
+            await interaction.reply({
+                ephemeral: true,
+                embeds: [constructPlayEmbed((() => {
+                    if (play === 'Home Run') {
+                        return currentPlayProcessor.process(
+                            examplePlays.homeRun,
+                            feed,
+                            globalCache.values.emojis.find(e => e.name.includes('angels')),
+                            globalCache.values.emojis.find(e => e.name.includes('brewers'))
+                        );
+                    } else if (play === 'Steal') {
+                        return currentPlayProcessor.process(
+                            examplePlays.steal,
+                            feed,
+                            globalCache.values.emojis.find(e => e.name.includes('angels')),
+                            globalCache.values.emojis.find(e => e.name.includes('brewers'))
+                        );
+                    } else if (play === 'Challenge') {
+                        return currentPlayProcessor.process(
+                            examplePlays.inProgressChallenge,
+                            feed,
+                            globalCache.values.emojis.find(e => e.name.includes('angels')),
+                            globalCache.values.emojis.find(e => e.name.includes('brewers'))
+                        );
+                    }
+                })(),
+                feed,
+                true,
+                '#BA0021',
+                '#FFC52F',
+                globalCache.values.emojis.find(e => e.name.includes('angels')),
+                globalCache.values.emojis.find(e => e.name.includes('brewers'))
+                )]
+            });
+        }
+    },
+
     gamedayPreferenceHandler: async (interaction) => {
         console.info(`GAMEDAY PREFERENCE command invoked by guild: ${interaction.guildId}`);
-        if (!interaction.member.roles.cache.some(role => globals.ADMIN_ROLES.includes(role.name))) {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
             await interaction.reply({
                 ephemeral: true,
                 content: 'You do not have permission to use this command.'
@@ -226,7 +305,7 @@ module.exports = {
 
     unSubscribeGamedayHandler: async (interaction) => {
         console.info(`UNSUBSCRIBE GAMEDAY command invoked by guild: ${interaction.guildId}`);
-        if (!interaction.member.roles.cache.some(role => globals.ADMIN_ROLES.includes(role.name))) {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
             await interaction.reply({
                 ephemeral: true,
                 content: 'You do not have permission to un-subscribe channels to the Gameday feed.'
@@ -267,7 +346,7 @@ module.exports = {
             }
             const linescore = await mlbAPIUtil.linescore(game.gamePk);
             const linescoreAttachment = new AttachmentBuilder(
-                await commandUtil.buildLineScoreTable(game, linescore)
+                commandUtil.buildLineScoreTable(game, linescore)
                 , { name: 'line_score.png' });
             await commandUtil.giveFinalCommandResponse(toHandle, {
                 ephemeral: false,
@@ -304,25 +383,32 @@ module.exports = {
                 mlbAPIUtil.boxScore(game.gamePk),
                 mlbAPIUtil.liveFeedBoxScoreNamesOnly(game.gamePk)
             ]);
-            const boxscoreAttachment = new AttachmentBuilder(
-                await commandUtil.buildBoxScoreTable(game, boxScore, boxScoreNames, statusCheck.gameData.status.abstractGameState)
-                , { name: 'boxscore.png' });
-            const awayAbbreviation = game.teams.away.team?.abbreviation || game.teams.away.abbreviation;
-            const homeAbbreviation = game.teams.home.team?.abbreviation || game.teams.home.abbreviation;
-            await commandUtil.giveFinalCommandResponse(toHandle, {
-                ephemeral: false,
-                content: homeAbbreviation + ' vs. ' + awayAbbreviation +
-                    ', ' + new Date(game.gameDate).toLocaleString('default', {
-                    month: 'short',
-                    day: 'numeric',
-                    timeZone: 'America/New_York',
-                    hour: 'numeric',
-                    minute: '2-digit',
-                    timeZoneName: 'short'
-                }),
-                components: [],
-                files: [boxscoreAttachment]
-            });
+            const boxScoreChoiceToHandle = await commandUtil.getHomeAwayChoice(
+                toHandle,
+                boxScore.teams,
+                'Which team would you like to view the box score for?'
+            );
+            if (boxScoreChoiceToHandle) {
+                const boxscoreAttachment = new AttachmentBuilder(
+                    commandUtil.buildBoxScoreTable(game, boxScore, boxScoreNames, statusCheck.gameData.status.abstractGameState, boxScoreChoiceToHandle)
+                    , { name: 'boxscore.png' });
+                const awayAbbreviation = game.teams.away.team?.abbreviation || game.teams.away.abbreviation;
+                const homeAbbreviation = game.teams.home.team?.abbreviation || game.teams.home.abbreviation;
+                await commandUtil.giveFinalCommandResponse(boxScoreChoiceToHandle, {
+                    ephemeral: false,
+                    content: homeAbbreviation + ' vs. ' + awayAbbreviation +
+                        ', ' + new Date(game.gameDate).toLocaleString('default', {
+                        month: 'short',
+                        day: 'numeric',
+                        timeZone: (process.env.TIME_ZONE?.trim() || 'America/New_York'),
+                        hour: 'numeric',
+                        minute: '2-digit',
+                        timeZoneName: 'short'
+                    }) + `: **${commandUtil.getTeamDisplayString(boxScore.teams, parseInt(boxScoreChoiceToHandle.customId))} Box Score**\n`,
+                    components: [],
+                    files: [boxscoreAttachment]
+                });
+            }
         }
     },
 
@@ -346,23 +432,30 @@ module.exports = {
             } else {
                 updatedLineup = gameLineups.dates[0].games[0];
             }
-            const ourTeamLineup = updatedLineup.teams.home.team.id === parseInt(process.env.TEAM_ID)
-                ? updatedLineup.lineups?.homePlayers
-                : updatedLineup.lineups?.awayPlayers;
-            if (!ourTeamLineup) {
-                await commandUtil.giveFinalCommandResponse(toHandle, {
-                    content: commandUtil.constructGameDisplayString(game) + ' - No lineup card has been submitted for this game yet.',
+            const lineupChoiceToHandle = await commandUtil.getHomeAwayChoice(
+                toHandle,
+                updatedLineup.teams,
+                'Which team would you like to view the lineup card for?'
+            );
+            if (lineupChoiceToHandle) {
+                const teamLineup = updatedLineup.teams.home.team.id === parseInt(lineupChoiceToHandle.customId)
+                    ? updatedLineup.lineups?.homePlayers
+                    : updatedLineup.lineups?.awayPlayers;
+                if (!teamLineup) {
+                    await commandUtil.giveFinalCommandResponse(lineupChoiceToHandle, {
+                        content: commandUtil.constructGameDisplayString(game) + ' - No lineup card has been submitted for this game yet.',
+                        ephemeral: false,
+                        components: []
+                    });
+                    return;
+                }
+                await commandUtil.giveFinalCommandResponse(lineupChoiceToHandle, {
                     ephemeral: false,
-                    components: []
+                    content: commandUtil.constructGameDisplayString(game) + `: **${commandUtil.getTeamDisplayString(updatedLineup.teams, parseInt(lineupChoiceToHandle.customId))} Lineup**\n`,
+                    components: [],
+                    files: [new AttachmentBuilder(await commandUtil.getLineupCardTable(teamLineup, game.gameType), { name: 'lineup.png' })]
                 });
-                return;
             }
-            await commandUtil.giveFinalCommandResponse(toHandle, {
-                ephemeral: false,
-                content: commandUtil.constructGameDisplayString(game) + '\n',
-                components: [],
-                files: [new AttachmentBuilder(await commandUtil.getLineupCardTable(updatedLineup), { name: 'lineup.png' })]
-            });
         }
     },
 
@@ -398,19 +491,16 @@ module.exports = {
         console.info(`PITCHER command invoked by guild: ${interaction.guildId}`);
         await interaction.deferReply();
         const playerName = interaction.options.getString('player')?.trim();
-        const playerResult = await commandUtil.getPlayerFromUserInputOrLiveFeed(playerName, interaction, 'Pitcher');
-        const pitcher = playerResult.player;
-        if (!pitcher && !playerName) {
-            await interaction.followUp('No game is live right now!');
-            return;
-        }
-        const pitcherInfo = await commandUtil.hydrateProbable(pitcher.id);
+        const statType = interaction.options.getString('stat_type');
+        const playerResult = await commandUtil.resolvePlayer(interaction, playerName, 'Pitcher');
+        if (!playerResult) return;
+        const pitcherInfo = await commandUtil.hydrateProbable(playerResult.player.id, (statType || 'R'), (interaction.options.getInteger('year') || new Date().getFullYear()));
         const attachment = new AttachmentBuilder(Buffer.from(pitcherInfo.spot), { name: 'spot.png' });
         const replyOptions = {
             ephemeral: false,
             files: [attachment],
             embeds: [commandUtil.getPitcherEmbed(
-                pitcher,
+                playerResult.player,
                 pitcherInfo,
                 !playerName,
                 commandUtil.buildPitchingStatsMarkdown(
@@ -419,8 +509,12 @@ module.exports = {
                     pitcherInfo.pitchingStats.lastXGames,
                     pitcherInfo.pitchingStats.seasonAdvanced,
                     pitcherInfo.pitchingStats.sabermetrics,
+                    (statType || 'R'),
                     true
-                ))],
+                ),
+                (statType || 'R'),
+                false,
+                interaction.options.getInteger('year'))],
             components: [],
             content: ''
         };
@@ -431,25 +525,27 @@ module.exports = {
         console.info(`BATTER command invoked by guild: ${interaction.guildId}`);
         await interaction.deferReply();
         const playerName = interaction.options.getString('player')?.trim();
-        const playerResult = await commandUtil.getPlayerFromUserInputOrLiveFeed(playerName, interaction, 'Batter');
-        const batter = playerResult.player;
-        if (!batter && !playerName) {
-            await interaction.followUp('No game is live right now!');
-            return;
-        }
-        const batterInfo = await commandUtil.hydrateHitter(batter.id);
+        const statType = interaction.options.getString('stat_type');
+        const playerResult = await commandUtil.resolvePlayer(interaction, playerName, 'Batter');
+        if (!playerResult) return;
+        const batterInfo = await commandUtil.hydrateHitter(playerResult.player.id, (statType || 'R'), interaction.options.getInteger('year') || new Date().getFullYear());
         const attachment = new AttachmentBuilder(Buffer.from(batterInfo.spot), { name: 'spot.png' });
         const replyOptions = {
             ephemeral: false,
             files: [attachment],
             embeds: [commandUtil.getBatterEmbed(
-                batter,
+                playerResult.player,
                 batterInfo,
                 !playerName,
                 commandUtil.formatSplits(
                     batterInfo.stats.stats.find(stat => stat.type.displayName === 'season'),
                     batterInfo.stats.stats.find(stat => stat.type.displayName === 'statSplits'),
-                    batterInfo.stats.stats.find(stat => stat.type.displayName === 'lastXGames'))
+                    batterInfo.stats.stats.find(stat => stat.type.displayName === 'lastXGames'),
+                    (statType || 'R')
+                ),
+                (statType || 'R'),
+                false,
+                interaction.options.getInteger('year')
             )],
             components: [],
             content: ''
@@ -461,31 +557,31 @@ module.exports = {
         console.info(`BATTER SAVANT command invoked by guild: ${interaction.guildId}`);
         await interaction.deferReply();
         const playerName = interaction.options.getString('player')?.trim();
-        const playerResult = await commandUtil.getPlayerFromUserInputOrLiveFeed(playerName, interaction, 'Batter');
-        const batter = playerResult.player;
-        if (!batter && !playerName) {
-            await interaction.followUp('No game is live right now!');
-            return;
-        }
-        const text = await mlbAPIUtil.savantPage(batter.id, 'hitting');
-        const statcastData = commandUtil.getStatcastData(text);
-        if (statcastData.mostRecentStatcast && statcastData.mostRecentMetricYear && statcastData.metricSummaryJSON) {
-            const batterInfo = await commandUtil.hydrateHitter(batter.id);
-            const savantAttachment = new AttachmentBuilder((await commandUtil.buildBatterSavantTable(
-                statcastData.mostRecentStatcast,
-                statcastData.metricSummaryJSON[statcastData.mostRecentMetricYear.toString()],
-                batterInfo.spot)), { name: 'savant.png' });
+        const playerResult = await commandUtil.resolvePlayer(interaction, playerName, 'Batter');
+        if (!playerResult) return;
+        const text = await mlbAPIUtil.savantPage(playerResult.player.id, 'hitting');
+        const statcastData = commandUtil.getStatcastData(text, interaction.options.getInteger('year'));
+        if (statcastData.matchingStatcast && statcastData.matchingMetricYear && statcastData.metricSummaryJSON) {
+            const batterInfo = await commandUtil.hydrateHitter(
+                playerResult.player.id,
+                'R',
+                interaction.options.getInteger('year') || new Date().getFullYear()
+            );
+            const savantAttachment = new AttachmentBuilder(commandUtil.buildBatterSavantTable(
+                statcastData.matchingStatcast,
+                statcastData.metricSummaryJSON[statcastData.matchingMetricYear.toString()],
+                batterInfo.spot), { name: 'savant.png' });
             const replyOptions = {
                 ephemeral: false,
                 files: [savantAttachment],
-                embeds: [commandUtil.getBatterEmbed(batter, batterInfo, !playerName, null, true)],
+                embeds: [commandUtil.getBatterEmbed(playerResult.player, batterInfo, !playerName, null, null, true, interaction.options.getInteger('year'))],
                 components: [],
                 content: ''
             };
             await (playerResult.shouldEditReply ? interaction.editReply(replyOptions) : interaction.followUp(replyOptions));
         } else {
             await interaction.followUp({
-                content: 'There was a problem fetching the savant metrics for this player.'
+                content: 'There is no statcast data for this player for the chosen season.'
             });
         }
     },
@@ -494,31 +590,31 @@ module.exports = {
         console.info(`PITCHER SAVANT command invoked by guild: ${interaction.guildId}`);
         await interaction.deferReply();
         const playerName = interaction.options.getString('player')?.trim();
-        const playerResult = await commandUtil.getPlayerFromUserInputOrLiveFeed(playerName, interaction, 'Pitcher');
-        const pitcher = playerResult.player;
-        if (!pitcher && !playerName) {
-            await interaction.followUp('No game is live right now!');
-            return;
-        }
-        const text = await mlbAPIUtil.savantPage(pitcher.id, 'pitching');
-        const statcastData = commandUtil.getStatcastData(text);
-        if (statcastData.mostRecentStatcast && statcastData.mostRecentMetricYear && statcastData.metricSummaryJSON) {
-            const pitcherInfo = await commandUtil.hydrateProbable(pitcher.id);
-            const savantAttachment = new AttachmentBuilder((await commandUtil.buildPitcherSavantTable(
-                statcastData.mostRecentStatcast,
-                statcastData.metricSummaryJSON[statcastData.mostRecentMetricYear.toString()],
-                pitcherInfo.spot)), { name: 'savant.png' });
+        const playerResult = await commandUtil.resolvePlayer(interaction, playerName, 'Pitcher');
+        if (!playerResult) return;
+        const text = await mlbAPIUtil.savantPage(playerResult.player.id, 'pitching');
+        const statcastData = commandUtil.getStatcastData(text, interaction.options.getInteger('year'));
+        if (statcastData.matchingStatcast && statcastData.matchingMetricYear && statcastData.metricSummaryJSON) {
+            const pitcherInfo = await commandUtil.hydrateProbable(
+                playerResult.player.id,
+                'R',
+                interaction.options.getInteger('year') || new Date().getFullYear()
+            );
+            const savantAttachment = new AttachmentBuilder(commandUtil.buildPitcherSavantTable(
+                statcastData.matchingStatcast,
+                statcastData.metricSummaryJSON[statcastData.matchingMetricYear.toString()],
+                pitcherInfo.spot), { name: 'savant.png' });
             const replyOptions = {
                 ephemeral: false,
                 files: [savantAttachment],
-                embeds: [commandUtil.getPitcherEmbed(pitcher, pitcherInfo, !playerName, null, true)],
+                embeds: [commandUtil.getPitcherEmbed(playerResult.player, pitcherInfo, !playerName, null, 'R', true, interaction.options.getInteger('year'))],
                 components: [],
                 content: ''
             };
             await (playerResult.shouldEditReply ? interaction.editReply(replyOptions) : interaction.followUp(replyOptions));
         } else {
             await interaction.followUp({
-                content: 'There was a problem fetching the savant metrics for this player.'
+                content: 'There is no statcast data for this player for the chosen season.'
             });
         }
     },

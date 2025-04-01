@@ -63,15 +63,18 @@ module.exports = {
         'other_out'
     ],
     SAVANT_POLLING_INTERVAL: 15000,
+    SAVANT_POLLING_ATTEMPTS: 10,
+    SAVANT_POLLING_BACKOFF_INCREASE: 10000,
+    HOME_RUN_BALLPARKS_MIN_DISTANCE: 300,
     SLOW_POLL_INTERVAL: 300000,
     GAMEDAY_PING_INTERVAL: 10000,
     HIGHLIGHTS_PER_MESSAGE: 8,
     SCORING_PLAYS_PER_MESSAGE: 8,
     DATE: null,
-    ADMIN_ROLES: [ "Mod" ],
     TEAM_COLOR_CONTRAST_RATIO: 1.5,
-    HOME_RUN_PARKS_MIN: 4,
-    HOME_RUN_PARKS_MAX: 26,
+    HOME_RUN_PARKS_MIN: 5,
+    HOME_RUN_PARKS_MAX: 25,
+    MAX_LEVENSHTEIN_DISTANCE: 3,
     EVENTS: [
         "Double",
         "Double Play",
@@ -229,7 +232,7 @@ module.exports = {
             "id": 110,
             "name": "Orioles",
             "primaryColor": "#DF4601",
-            "secondaryColor": "#000000",
+            "secondaryColor": "#030303", // this should be #000000, but there's a Discord bug where embeds don't display that color on mobile.
             "abbreviation": "BAL"
         },
         {
@@ -250,7 +253,7 @@ module.exports = {
             "id": 113,
             "name": "Reds",
             "primaryColor": "#C6011F",
-            "secondaryColor": "#000000",
+            "secondaryColor": "#030303", // this should be #000000, but there's a Discord bug where embeds don't display that color on mobile.
             "abbreviation": "CIN"
         },
         {

@@ -2,9 +2,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { Client, Collection, GatewayIntentBits } = require('discord.js');
 const gameday = require('./modules/gameday');
-const globalCache = require("./modules/global-cache");
-const queries = require("./database/queries");
-const ReusableBrowser = require("./modules/classes/ReusableBrowser");
+const globalCache = require('./modules/global-cache');
+const queries = require('./database/queries');
 const { LOG_LEVEL } = require('./config/globals');
 const LOGGER = require('./modules/logger')(process.env.LOG_LEVEL?.trim() || LOG_LEVEL.INFO);
 
@@ -27,9 +26,15 @@ for (const file of commandFiles) {
 
 BOT.once('ready', async () => {
     LOGGER.info('Ready!');
+    BOT.application.emojis.fetch().then(emojis => {
+        LOGGER.info('Fetched application emojis.');
+        globalCache.values.emojis = Array.from(emojis.values());
+    }).catch(e => {
+        console.error(e);
+        globalCache.values.emojis = [];
+    });
     globalCache.values.subscribedChannels = await queries.getAllSubscribedChannels();
     LOGGER.info('Subscribed channels: ' + JSON.stringify(globalCache.values.subscribedChannels, null, 2));
-    globalCache.values.browser = new ReusableBrowser();
     await gameday.statusPoll(BOT);
 });
 
